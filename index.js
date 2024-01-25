@@ -4,8 +4,11 @@ const axios = require("axios");
 const { IgApiClient } = require("instagram-private-api");
 const { get } = require("request-promise");
 const sharp = require('sharp');
-
-
+const ffmpegInstaller = require("@ffmpeg-installer/ffmpeg");
+const ffprobe = require("@ffprobe-installer/ffprobe");
+const ffmpeg = require("fluent-ffmpeg")()
+.setFfprobePath(ffprobe.path)
+.setFfmpegPath(ffmpegInstaller.path);
 
 
 
@@ -45,13 +48,42 @@ const dataVariable = {
   ig : new IgApiClient(),
   dataPath: "datas",
   cookiesPath : 'cookies',
-  nameWorkFlow:{
-    0: 'imgandtext2img_v1'
+  workFlow:{ // keyinput get from local ui-comfu :: 3000
+    0: {nameWorkFlow:'imgandtext2img_v1',typeOutPut:"image",keyInput:{
+      "3": {
+        "clip": [
+          "381",
+          1
+        ],
+        "text": " girl, beautiful, full body, surrounding scenery"
+      },
+      "4": {
+        "clip": [
+          "381",
+          1
+        ],
+        "text": "embed: nice, good quality, scale 1080x1080 pixels"
+      },
+      "37": {
+        "image": "1705166003270 (1).png",
+        "upload": "image"
+      },
+      "105": {
+        "image": "AnimateDiff_00001_.png",
+        "upload": "image"
+      }
+    }},
+    1: {nameWorkFlow:'img2vid_v1',typeOutPut:"vid",keyInput:{
+      "23": {
+        "image": "1705767394027.png",
+        "upload": "image"
+      }
+    }}
   },
 MAX_SIZE_BYTES : 100 * 1024,// 100KB
  MAX_QUALITY : 65 ,
 }
- const {USERNAME,PASSWORD,userInstagram,ig,nameWorkFlow , MAX_QUALITY,keyInput } = dataVariable
+ const {USERNAME,PASSWORD,userInstagram,ig,workFlow , MAX_QUALITY,keyInput } = dataVariable
  let {dataPath,cookiesPath} = dataVariable
  
 
@@ -72,8 +104,8 @@ MAX_SIZE_BYTES : 100 * 1024,// 100KB
       console.log("log use cookies");
 
       //3 get img from instagram and handle in (confyui + lavel) -> post instagram
-      workFlowGetHandleAndPost(nameWorkFlow[0])
-      //await postReelsToInsta() example post reel
+    
+      workFlowGetHandleAndPost(0) // key from obj workflow
 
       return
 
@@ -161,7 +193,15 @@ const handleGetData = async (userName) =>{
   return base64String  //  return base64(images[0])
 }
 
+const randomKeyWork = async()=>{
+  const objInput = []
+  for(let i = 0 ; i< 5; i++){
+    const randomInput = Math.floor(Math.random() * Object.keys(keyInput).length);
+    objInput.push(keyInput[randomInput])
+  }
+  return objInput
 
+}
 
 // func handle api instagram
 async function getDataFromUser(userName) 
@@ -226,32 +266,58 @@ const postImageToInsta = async (urlImage,descriptionImage) => {
   }
   
 }
-const postReelsToInsta = async () =>{
-  const file = fs.readFileSync("./vid2reel.mp4", (err, data) => {
-    if (err) {
-      console.error('Error reading file:', err);
-      return;
-    }})
+const postReelsToInsta = async (urlVid,base64Image,depcrition) =>{
+    
+    const base64DataImage = base64Image.replace(/^data:image\/\w+;base64,/, ''); // handle base64 to buffer
+    const imageBuffer = Buffer.from(base64DataImage, 'base64');
+    const resizedImageBuffer = await sharp(imageBuffer) // handle file image
+     .jpeg({ quality: MAX_QUALITY }) 
+     .toBuffer();  
 
-    const imageBuffer = await get({ // DEMO IMAGE https://www.instagram.com/reel/C2ctcpBJvDL/
-      url: 'https://i.imgur.com/BZBHsauh.jpg',
-      encoding: null, 
-  });
+   
+     try {
+       // Lấy buffer từ URL của file GIF
+         const gifBuffer = await get({ 
+           url: urlVid,
+           encoding: null, 
+         });
+         fs.writeFileSync('tempGif.gif', gifBuffer);
+         
+         ffmpeg
+         .input('tempGif.gif')
+         .outputOptions([
+           "-pix_fmt yuv420p",
+           "-c:v libx264",
+           "-movflags +faststart",
+           "-filter:v crop='floor(in_w/2)*2:floor(in_h/2)*2'",
+         ])
+         .noAudio()
+         .output(`tempGif.mp4`)
+         .on("end", async() => {
+           try {
+            // read file
+            const mp4Buffer = fs.readFileSync('tempGif.mp4');
+      
+            await ig.publish.video({
+              video: mp4Buffer,
+              coverImage: resizedImageBuffer,
+              isClip: true,
+              clipsPreviewToFeed: true,
+              caption: depcrition,
+            });
+            console.log("Upload success");
+          } catch (e) {
+            console.log("err post:", e);
+          }
+         })
+         .on("error", (e) => console.log(e))
+         .run();
+      
+     }catch (error) {
+       throw error;
+     }
 
-  try{
-     await ig.publish.video({
-      video: file,
-      coverImage: imageBuffer,
-      isClip: true,
-      clipsPreviewToFeed: true,
-      caption:"123",
-      });
-    console.log("post success")
 
-  }catch(e){
-    console.log(e)
-  }
-  
 }
 
 
@@ -261,75 +327,68 @@ const handleUploadImgToComfyui = async (base64) => {
 
   const res = await axios.post(process.env.POSTIMAGE, { // call api post image to comfyui server
     base64: base64,
-  }, { headers: process.env.HEADERs });
-  return res.data.message; // return file name image in comfyui
+  }, { headers: {
+    Authorization: process.env.Authorization
+  } });
+  return res.data.message; // return file name image in comfyuisss
 };
-const handleWorkFlowComfy = async (nameImage,nameWorkFlow) =>{
+const handleWorkFlowComfy = async (nameImage,dataWorkFlow) =>{
   const resworkFlow = await axios.post(process.env.GETWORKFLCOMFYUI, {  // get workfl comfyui bt name
-  nameWorkflow: nameWorkFlow
-}, { headers: process.env.HEADERs });
+  nameWorkflow: dataWorkFlow.nameWorkFlow
+}, { headers: {
+  Authorization: process.env.Authorization
+} });
 
    const workflow = resworkFlow.data.message.jsonWorkflow
   
-
-  // // handle output img 
-   for (const key in workflow) { 
-    if (workflow.hasOwnProperty(key)) {
-      if(workflow[key].class_type === "SaveImage"){
-        if(key<999){
-          workflow[999] = workflow[key]
-          delete  workflow[key]
-        }
-  
+if(dataWorkFlow.typeOutPut === "image"){
+    // // handle output img  : last node not image
+    for (const key in workflow) { 
+      if (workflow.hasOwnProperty(key)) {
+        if(workflow[key].class_type === "SaveImage"){
+          if(key<999){
+            workflow[999] = workflow[key]
+            delete  workflow[key]
+          }
+    
+        }  
       }
-      
     }
-  }
-  const stringInput = { // get from ui-comfyui
-    "3": {
-      "clip": [
-        "381",
-        1
-      ],
-      "text": "3d"
-    },
-    "4": {
-      "clip": [
-        "381",
-        1
-      ],
-      "text": "good "
-    },
-    "37": {
-      "image": "1705634035923.png",
-      "upload": "image"
-    },
-    "105": {
-      "image": "1705634035923.png",
-      "upload": "image"
-    }
-  }
-  const randomInput1 = Math.floor(Math.random() * Object.keys(keyInput).length);
-  const Input1 = keyInput[randomInput1];
-  const randomInput2 = Math.floor(Math.random() * Object.keys(keyInput).length);
-  const Input2 = keyInput[randomInput2];
+}
 
-  stringInput[3].text = `${Input1} ${Input2}`
-  stringInput[4].text = "dip: worst quality, worst quality, super low capacity 100kb,:1.2, 9:16 ratio with image size 1080x1920"
-  stringInput[37].image = nameImage
-  stringInput[105].image = nameImage
+  // random keywork for text input comfyui
+  const randomInput = randomKeyWork() // randomKeyWork.lenght = 5
+
+
+ let jsonKeyInput = dataWorkFlow["keyInput"]
+
+  // update jsonKeyInput : from workFlow[keyWorkFlow].keyInput and update data| example
+
+     ////// workFlow[0].keyInput: ///////
+  jsonKeyInput[3].text = `${randomInput[0]} ${randomInput[1]}`
+  jsonKeyInput[4].text = "dip: worst quality, worst quality, super low capacity 100kb,:1.2, 9:16 ratio with image size 1080x1920"
+  jsonKeyInput[37].image = nameImage
+  jsonKeyInput[105].image = nameImage
+
+    ////// workFlow[1].keyInput: ///////
+   //jsonKeyInput[23].image = nameImage
+
+
+
   
 
-  for (let key in stringInput) {
+  for (let key in jsonKeyInput) { // match jsonKeyInput
     if (workflow.hasOwnProperty(key)) {
-      workflow[key].inputs = stringInput[key];
+      workflow[key].inputs = jsonKeyInput[key];
     }
  }
 
   const res = await axios.post(process.env.POSTQUEUE,{ // post workfl to comfyui
     jsonWl:workflow
-  }, { headers: process.env.HEADERs });
-  return res.data.message //return link image
+  }, { headers:{
+    Authorization: process.env.Authorization
+  } });
+  return res.data.message //return link output
 
 
 
@@ -350,7 +409,8 @@ const handleLlava = async(urlImage) =>{
 
 // func handle flow
 
-const workFlowGetHandleAndPost = async (nameWorkFlow) =>{ 
+const workFlowGetHandleAndPost = async (keyWorkFlow) =>{ 
+  const dataWorkFlow = workFlow[keyWorkFlow]
   const randomKey = Math.floor(Math.random() * Object.keys(userInstagram).length);
   const userName = userInstagram[randomKey];
    dataPath = `${dataPath}/${userName}.json`;
@@ -358,11 +418,15 @@ const workFlowGetHandleAndPost = async (nameWorkFlow) =>{
   try{
     const base64 = await getDataFromUser(userName); // get base64(image[0]) from data user instagram   done
     const nameImage = await handleUploadImgToComfyui(base64); // upload file img from instagram and return filename img in comfyui done
-    const urlImage = await handleWorkFlowComfy(nameImage,nameWorkFlow)  // handle image by comfyui runturn url Image after handle in comfyui  done
-    console.log(urlImage) // log file images
-    const descriptionImage = await handleLlava(urlImage); // get description Image by  Llava done
-    console.log(descriptionImage) // log depcrition
-     await postImageToInsta(urlImage,descriptionImage)  // post content to Instagram   // err
+    const urlComfyui = await handleWorkFlowComfy(nameImage,dataWorkFlow)  // handle image by comfyui runturn url Image after handle in comfyui  done
+    console.log(urlComfyui) // log output
+    if(dataWorkFlow.typeOutPut === "image"){
+    const descriptionImage = await handleLlava(urlComfyui); // get description Image by  Llava done
+    return await postImageToInsta(urlComfyui,descriptionImage)  // post content to Instagram   // err
+    }else{
+    //const descriptionImage = await handleLlava(urlComfyui); 
+    return await postReelsToInsta(urlComfyui,base64,"abc test") 
+    }
   }catch(e){
     console.log(e)
   }
@@ -372,9 +436,12 @@ const workFlowGetHandleAndPost = async (nameWorkFlow) =>{
 
 /// run code
 main()
+
+// how ? choose key obj work flow in main()  -> changle input work in handleWorkFlowComfy()
 // flow
 // 1: check cookies ? login use cookies : login use acc
 // 2: run work flow
+
 
 // workflow: 
 // 1 check data json image ? get new data images : use data json image current         => update jsonfile() and  return base64(image[0]) (95%)
@@ -382,4 +449,7 @@ main()
 // 3 handle image in comfyui (name image in comfyui)    => return   uri(image)  => done
 // 4 get text image Llava  uri(image) ==> return text    done
 // 5 post content to instagram (uri(image),text)   err IgResponseError: POST /... 400 Bad Request;
+
+
+// write code -> flow
 
